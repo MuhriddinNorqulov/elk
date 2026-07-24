@@ -1,0 +1,136 @@
+name: elk
+
+networks:
+  elk:
+    driver: bridge
+
+services:
+  # ---------------------------------------------------------------------------
+  # Elasticsearch — single node, security off, faqat 127.0.0.1 da
+  # ---------------------------------------------------------------------------
+  es01:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    container_name: es01
+    volumes:
+      - ${ELK_DATA_ROOT}/esdata:/usr/share/elasticsearch/data
+      - ${ELK_DATA_ROOT}/snapshots:/usr/share/elasticsearch/snapshots
+    ports:
+      # 0.0.0.0 EMAS. Security o'chirilgan — tashqariga chiqarish xavfli.
+      - "127.0.0.1:9200:9200"
+    environment:
+      - node.name=es01
+      - cluster.name=${CLUSTER_NAME}
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.license.self_generated.type=basic
+      # snapshot repozitoriysi shu yo'ldan tashqarida ro'yxatdan o'tolmaydi
+      - path.repo=/usr/share/elasticsearch/snapshots
+      # heap'ni aniq belgilaymiz; mem_limit dan ~2x kichik bo'lsin (qolgani page cache)
+      - ES_JAVA_OPTS=-Xms${ES_HEAP} -Xmx${ES_HEAP}
+      - bootstrap.memory_lock=true
+      # kerak emas, lekin har ishga tushganda internetga urinib log iflos qiladi
+      - ingest.geoip.downloader.enabled=false
+    mem_limit: ${ES_MEM_LIMIT}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -sf 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=2s' >/dev/null || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+    networks: [elk]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Kibana — faqat 127.0.0.1. Tashqariga ochish uchun avval security yoqing.
+  # ---------------------------------------------------------------------------
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${STACK_VERSION}
+    container_name: kibana
+    depends_on:
+      es01:
+        condition: service_healthy
+    volumes:
+      - ${ELK_DATA_ROOT}/kibanadata:/usr/share/kibana/data
+    ports:
+      - "127.0.0.1:5601:5601"
+    environment:
+      - SERVERNAME=kibana
+      - ELASTICSEARCH_HOSTS=http://es01:9200
+      # saqlangan obyektlar (alert qoidalari) shu kalit bilan shifrlanadi
+      - XPACK_SECURITY_ENCRYPTIONKEY=${ENCRYPTION_KEY}
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${ENCRYPTION_KEY}
+      - XPACK_REPORTING_ENCRYPTIONKEY=${ENCRYPTION_KEY}
+      - MONITORING_UI_CONTAINER_ELASTICSEARCH_ENABLED=true
+      - I18N_LOCALE=en
+    mem_limit: ${KB_MEM_LIMIT}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -sf http://localhost:5601/api/status | grep -q '"level":"available"' || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 90s
+    networks: [elk]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Filebeat — shu xostdagi konteyner loglarini yig'adi
+  # ---------------------------------------------------------------------------
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:${STACK_VERSION}
+    container_name: filebeat
+    depends_on:
+      es01:
+        condition: service_healthy
+    user: root
+    command: ["--strict.perms=false"]
+    volumes:
+      - ./config/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      # registry — qaysi fayldan qayergacha o'qilgani. YO'QOTMANG.
+      - ${ELK_DATA_ROOT}/filebeatdata:/usr/share/filebeat/data
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - ELASTIC_HOSTS=http://es01:9200
+      - KIBANA_HOSTS=http://kibana:5601
+    mem_limit: ${FB_MEM_LIMIT}
+    networks: [elk]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Metricbeat — Stack Monitoring (ES heap, GC, indexing rate) + docker/system
+  # Kerak bo'lmasa shu blokni izohga oling, ~400 MB RAM tejaysiz.
+  # ---------------------------------------------------------------------------
+  metricbeat:
+    image: docker.elastic.co/beats/metricbeat:${STACK_VERSION}
+    container_name: metricbeat
+    depends_on:
+      es01:
+        condition: service_healthy
+      kibana:
+        condition: service_healthy
+    user: root
+    command: ["--strict.perms=false", "-system.hostfs=/hostfs"]
+    volumes:
+      - ./config/metricbeat.yml:/usr/share/metricbeat/metricbeat.yml:ro
+      - ${ELK_DATA_ROOT}/metricbeatdata:/usr/share/metricbeat/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys/fs/cgroup:/hostfs/sys/fs/cgroup:ro
+      - /proc:/hostfs/proc:ro
+      - /:/hostfs:ro
+    environment:
+      - ELASTIC_HOSTS=http://es01:9200
+      - KIBANA_HOSTS=http://kibana:5601
+    mem_limit: ${MB_MEM_LIMIT}
+    networks: [elk]
+    restart: unless-stopped

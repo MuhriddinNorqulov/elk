@@ -17,7 +17,7 @@ services:
       - ${ELK_DATA_ROOT}/esdata:/usr/share/elasticsearch/data
       - ${ELK_DATA_ROOT}/snapshots:/usr/share/elasticsearch/snapshots
     ports:
-      - "127.0.0.1:9200:9200"
+      - "${ES_BIND_IP}:9200:9200"
     environment:
       - node.name=es01
       - cluster.name=${CLUSTER_NAME}

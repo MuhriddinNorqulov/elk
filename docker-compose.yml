@@ -6,7 +6,9 @@ networks:
 
 services:
   # ---------------------------------------------------------------------------
-  # Elasticsearch — single node, security off, faqat 127.0.0.1 da
+  # Elasticsearch — single node, security YOQILGAN, TLS yo'q.
+  # Port faqat 127.0.0.1 da: Kibana va Beat'lar docker network orqali kiradi,
+  # tashqi kirish kerak emas.
   # ---------------------------------------------------------------------------
   es01:
     image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
@@ -15,20 +17,20 @@ services:
       - ${ELK_DATA_ROOT}/esdata:/usr/share/elasticsearch/data
       - ${ELK_DATA_ROOT}/snapshots:/usr/share/elasticsearch/snapshots
     ports:
-      # 0.0.0.0 EMAS. Security o'chirilgan — tashqariga chiqarish xavfli.
       - "127.0.0.1:9200:9200"
     environment:
       - node.name=es01
       - cluster.name=${CLUSTER_NAME}
       - discovery.type=single-node
-      - xpack.security.enabled=false
+      # Autentifikatsiya yoqilgan, lekin TLS'siz — ichki tarmoq uchun oraliq bosqich.
+      # single-node rejimida transport TLS majburiy emas, shuning uchun
+      # sertifikat zanjiri kerak bo'lmaydi.
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=false
       - xpack.license.self_generated.type=basic
-      # snapshot repozitoriysi shu yo'ldan tashqarida ro'yxatdan o'tolmaydi
       - path.repo=/usr/share/elasticsearch/snapshots
-      # heap'ni aniq belgilaymiz; mem_limit dan ~2x kichik bo'lsin (qolgani page cache)
       - ES_JAVA_OPTS=-Xms${ES_HEAP} -Xmx${ES_HEAP}
       - bootstrap.memory_lock=true
-      # kerak emas, lekin har ishga tushganda internetga urinib log iflos qiladi
       - ingest.geoip.downloader.enabled=false
     mem_limit: ${ES_MEM_LIMIT}
     ulimits:
@@ -39,9 +41,11 @@ services:
         soft: 65536
         hard: 65536
     healthcheck:
+      # 401 javobi ES tayyor ekanini bildiradi — parolni healthcheck'ga
+      # yozib qo'ymaslik uchun shu usul ishlatiladi.
       test:
         - CMD-SHELL
-        - curl -sf 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=2s' >/dev/null || exit 1
+        - curl -s http://localhost:9200 | grep -q 'missing authentication credentials'
       interval: 10s
       timeout: 5s
       retries: 60
@@ -50,7 +54,7 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # Kibana — faqat 127.0.0.1. Tashqariga ochish uchun avval security yoqing.
+  # Kibana — ichki tarmoqqa ochiq (192.168.x.x), login talab qiladi
   # ---------------------------------------------------------------------------
   kibana:
     image: docker.elastic.co/kibana/kibana:${STACK_VERSION}
@@ -61,11 +65,16 @@ services:
     volumes:
       - ${ELK_DATA_ROOT}/kibanadata:/usr/share/kibana/data
     ports:
-      - "127.0.0.1:5601:5601"
+      # 0.0.0.0 EMAS — aniq IP. Serverda boshqa (tashqi) interfeys bo'lsa,
+      # Kibana o'sha yerda ko'rinmaydi.
+      - "${KIBANA_BIND_IP}:5601:5601"
     environment:
       - SERVERNAME=kibana
+      - SERVER_PUBLICBASEURL=http://${KIBANA_BIND_IP}:5601
       - ELASTICSEARCH_HOSTS=http://es01:9200
-      # saqlangan obyektlar (alert qoidalari) shu kalit bilan shifrlanadi
+      # kibana_system — superuser emas, faqat Kibana'ning tizim vazifalari uchun
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
       - XPACK_SECURITY_ENCRYPTIONKEY=${ENCRYPTION_KEY}
       - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${ENCRYPTION_KEY}
       - XPACK_REPORTING_ENCRYPTIONKEY=${ENCRYPTION_KEY}
@@ -73,9 +82,10 @@ services:
       - I18N_LOCALE=en
     mem_limit: ${KB_MEM_LIMIT}
     healthcheck:
+      # security yoqilganda / manzili /login ga 302 qiladi
       test:
         - CMD-SHELL
-        - curl -sf http://localhost:5601/api/status | grep -q '"level":"available"' || exit 1
+        - curl -s -I http://localhost:5601 | grep -q '302 Found'
       interval: 15s
       timeout: 5s
       retries: 40
@@ -84,7 +94,7 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # Filebeat — shu xostdagi konteyner loglarini yig'adi
+  # Filebeat — shu xostdagi, label qo'yilgan konteynerlarning loglari
   # ---------------------------------------------------------------------------
   filebeat:
     image: docker.elastic.co/beats/filebeat:${STACK_VERSION}
@@ -96,20 +106,23 @@ services:
     command: ["--strict.perms=false"]
     volumes:
       - ./config/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
-      # registry — qaysi fayldan qayergacha o'qilgani. YO'QOTMANG.
+      # registry — qaysi fayldan qayergacha o'qilgani. YO'QOTMANG,
+      # aks holda barcha loglar qaytadan indekslanadi.
       - ${ELK_DATA_ROOT}/filebeatdata:/usr/share/filebeat/data
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - ELASTIC_HOSTS=http://es01:9200
       - KIBANA_HOSTS=http://kibana:5601
+      - ELASTIC_USER=elastic
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
     mem_limit: ${FB_MEM_LIMIT}
     networks: [elk]
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # Metricbeat — Stack Monitoring (ES heap, GC, indexing rate) + docker/system
-  # Kerak bo'lmasa shu blokni izohga oling, ~400 MB RAM tejaysiz.
+  # Metricbeat — Stack Monitoring + docker/system metrikalari
+  # Kerak bo'lmasa izohga oling, ~400 MB RAM tejaysiz.
   # ---------------------------------------------------------------------------
   metricbeat:
     image: docker.elastic.co/beats/metricbeat:${STACK_VERSION}
@@ -131,6 +144,8 @@ services:
     environment:
       - ELASTIC_HOSTS=http://es01:9200
       - KIBANA_HOSTS=http://kibana:5601
+      - ELASTIC_USER=elastic
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
     mem_limit: ${MB_MEM_LIMIT}
     networks: [elk]
     restart: unless-stopped

@@ -1,42 +1,54 @@
 # =============================================================================
-# Filebeat — Docker konteyner loglarini yig'ish
+# Metricbeat — Stack Monitoring + xost/konteyner metrikalari
 # =============================================================================
 
-filebeat.autodiscover:
-  providers:
-    - type: docker
-      hints.enabled: true
-      # MUHIM: false bo'lsa faqat `co.elastic.logs/enabled: "true"` labeli
-      # qo'yilgan konteynerlar yig'iladi.
-      #
-      # true qilsangiz Filebeat es01, kibana va o'zining loglarini ham
-      # indekslay boshlaydi — rekursiv shovqin hosil bo'ladi va disk tez to'ladi.
-      hints.default_config.enabled: false
+metricbeat.modules:
+  # xpack.enabled: true  →  Kibana'da "Stack Monitoring" sahifasi ishlaydi
+  - module: elasticsearch
+    xpack.enabled: true
+    period: 10s
+    hosts: ["${ELASTIC_HOSTS}"]
+    username: ${ELASTIC_USER}
+    password: ${ELASTIC_PASSWORD}
+
+  - module: kibana
+    xpack.enabled: true
+    period: 10s
+    hosts: ["${KIBANA_HOSTS}"]
+    username: ${ELASTIC_USER}
+    password: ${ELASTIC_PASSWORD}
+
+  - module: docker
+    metricsets: ["container", "cpu", "diskio", "healthcheck", "memory", "network"]
+    hosts: ["unix:///var/run/docker.sock"]
+    period: 10s
+
+  # /hostfs orqali xostning o'zini ko'radi
+  - module: system
+    metricsets: ["cpu", "load", "memory", "network", "process_summary"]
+    period: 30s
+  - module: system
+    metricsets: ["filesystem", "fsstat"]
+    period: 5m
+    processors:
+      - drop_event.when.regexp:
+          system.filesystem.mount_point: '^/(sys|cgroup|proc|dev|etc|host|lib|snap)($|/)'
 
 processors:
-  # container.name, container.image, docker labellarni har bir logga qo'shadi.
-  # Kibana'da `container.name: plagix-api` filtri shundan keladi.
   - add_docker_metadata: ~
   - add_host_metadata: ~
-  # shovqinni kamaytirish — bu maydonlar hech qachon kerak bo'lmaydi
-  - drop_fields:
-      fields: ["agent.ephemeral_id", "ecs.version", "input.type", "log.offset"]
-      ignore_missing: true
 
-# Kibana'ga tayyor dashboard'larni yuklash uchun kerak (modullar bilan ishlaganda)
 setup.kibana:
   host: ${KIBANA_HOSTS}
+  username: ${ELASTIC_USER}
+  password: ${ELASTIC_PASSWORD}
 
-# Index template va ILM'ni Filebeat o'zi yaratadi.
-# Retention siyosati bootstrap.sh da alohida qo'yiladi.
 setup.ilm.enabled: true
 
 output.elasticsearch:
   hosts: ["${ELASTIC_HOSTS}"]
-  # ES sekinlashsa Filebeat o'zini tiyadi, RAM to'ldirib crash bo'lmaydi
-  bulk_max_size: 50
-  backoff.init: 1s
-  backoff.max: 60s
+  username: ${ELASTIC_USER}
+  password: ${ELASTIC_PASSWORD}
 
 logging.level: info
 logging.metrics.enabled: false

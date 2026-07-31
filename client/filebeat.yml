@@ -1,0 +1,178 @@
+# =============================================================================
+# App serveridagi Filebeat
+#
+# Kutilayotgan tuzilma (host'da):
+#   /var/log/<servis>/async/2026-07-25.log
+#   /var/log/<servis>/gateway/2026-07-25.log
+#   /var/log/<servis>/http/2026-07-25.log
+#   /var/log/<servis>/ws/2026-07-25.log
+#
+# Katalog nomi = log_type. Yangi tur qo'shilsa konfigga tegish SHART EMAS.
+# Yangi kunlik fayl ham avtomatik topiladi.
+# =============================================================================
+
+
+
+filebeat.inputs:
+
+  - type: filestream
+    id: anticopy-dev                        # <-- SERVIS NOMI (unikal bo'lsin)
+    paths:
+      - /logs/anticopy/*/*.log
+
+    prospector.scanner:
+      # Har bir katalogdagi `.log` — joriy faylga simvolik havola.
+      # Kuzatilsa bugungi loglar IKKI MARTA indekslanadi.
+      symlinks: false
+      exclude_files: [ '/\.log$' ]
+
+    parsers:
+      - ndjson:
+          target: ""                  # maydonlar top-level ga chiqadi
+          overwrite_keys: true
+          add_error_key: true         # parse buzilsa json_error paydo bo'ladi
+          expand_keys: true
+
+    processors:
+      # ---- zap ISO8601 yozadi: "2026-07-20T14:47:11.327+0500" ----
+      # 'UNIX' (epoch float) EMAS — u bilan parse doim fail bo'lib,
+      # @timestamp = "Filebeat o'qigan payt" bo'lib qolardi.
+      - timestamp:
+          field: ts
+          layouts:
+            - '2006-01-02T15:04:05.000Z0700'
+            - '2006-01-02T15:04:05Z07:00'
+          ignore_missing: true
+
+      # Yo'ldan service va log_type ni ajratadi:
+      #   /logs/plagix/http/2026-07-25.log -> service=plagix, log_type=http
+      - dissect:
+          tokenizer: "/logs/%{service}/%{log_type}/%{}.log"
+          field: "log.file.path"
+          target_prefix: ""
+          ignore_failure: true
+
+      # zap nomlarini ECS'ga moslash — Kibana ekranlari shuni kutadi
+      #
+      # `error` TARTIBI MUHIM: ilova uni MATN qilib yozadi, ECS esa OBYEKT
+      # kutadi -> ES 400 (mapper_parsing_exception) qaytarib, Filebeat
+      # hujjatni jimgina tashlab yuborardi. Shuning uchun `error.message`
+      # birinchi turishi kerak: aks holda `error.stack_trace` matn `error`
+      # ni ustidan yozib yuboradi.
+      - rename:
+          fields:
+            - from: "error"
+              to: "error.message"
+            - from: "stacktrace"
+              to: "error.stack_trace"
+            - from: "msg"
+              to: "message"
+            - from: "level"
+              to: "log.level"
+            - from: "caller"
+              to: "log.origin.file.name"
+          ignore_missing: true
+          fail_on_error: false
+
+      - drop_fields:
+          fields: [ "ts" ]
+          ignore_missing: true
+
+    # 0 = butun tarix. Birinchi sinovda 168h qo'yib, @timestamp to'g'riligini
+    # tasdiqlagach 0 ga o'tkazing.
+    ignore_older: 0
+    clean_inactive: 0                 # ignore_older dan KATTA yoki 0
+
+    # Kun tugagach fayl o'zgarmaydi — harvester yopiladi, fd tejaladi.
+    # Bir yillik arxivda bu yuzlab file descriptor demakdir.
+    close.on_state_change.inactive: 30m
+
+  # ---------------------------------------------------------------------------
+  # Ikkinchi servis — nusxa olib, id / paths ni o'zgartiring.
+  # docker-compose.yml ga mos mount qo'shishni unutmang.
+  # ---------------------------------------------------------------------------
+  # - type: filestream
+  #   id: id-ilmiy
+  #   paths:
+  #     - /logs/id-ilmiy/*/*.log
+  #   prospector.scanner:
+  #     symlinks: false
+  #     exclude_files: ['/\.log$']
+  #   parsers:
+  #     - ndjson:
+  #         target: ""
+  #         overwrite_keys: true
+  #         add_error_key: true
+  #         expand_keys: true
+  #   processors:
+  #     - timestamp:
+  #         field: ts
+  #         layouts:
+  #           - '2006-01-02T15:04:05.000Z0700'
+  #           - '2006-01-02T15:04:05Z07:00'
+  #         ignore_missing: true
+  #     - dissect:
+  #         tokenizer: "/logs/%{service}/%{log_type}/%{}.log"
+  #         field: "log.file.path"
+  #         target_prefix: ""
+  #         ignore_failure: true
+  #     - rename:
+  #         fields:
+  #           - from: "error"
+  #             to: "error.message"
+  #           - from: "msg"
+  #             to: "message"
+  #           - from: "level"
+  #             to: "log.level"
+  #         ignore_missing: true
+  #         fail_on_error: false
+  #     - drop_fields:
+  #         fields: ["ts"]
+  #         ignore_missing: true
+  #   ignore_older: 0
+  #   clean_inactive: 0
+  #   close.on_state_change.inactive: 30m
+
+
+processors:
+  - add_host_metadata: ~
+
+  # Bir nechta app server bo'lganda ajratish uchun
+  - add_fields:
+      target: ""
+      fields:
+        server: ${SERVER_NAME}
+
+  - drop_fields:
+      fields: [ "agent.ephemeral_id", "ecs.version", "input.type", "log.offset" ]
+      ignore_missing: true
+
+
+# =============================================================================
+# Index template, ILM va dashboard'larni MARKAZIY Filebeat yaratgan.
+# Remote agent buni takrorlamasligi kerak — cheklangan API key bilan
+# qila olmaydi ham va ishga tushmay xato beradi.
+# =============================================================================
+setup.ilm.enabled: false
+setup.template.enabled: false
+setup.kibana.enabled: false
+
+
+output.elasticsearch:
+  hosts: [ "${ELASTIC_HOSTS}" ]
+  # XOM format: <id>:<api_key>. Kibana bergan Base64 ("Encoded") EMAS.
+  api_key: "${ELASTIC_API_KEY}"
+  bulk_max_size: 50
+  backoff.init: 1s
+  backoff.max: 60s
+
+# =============================================================================
+# Filebeat'ning O'Z loglari.
+# to_files: false + to_stderr: true  ->  `docker logs filebeat` da ko'rinadi.
+# Aks holda ular konteyner ichidagi /usr/share/filebeat/logs/ ga yozilib,
+# tashqaridan ko'rinmay qoladi.
+# =============================================================================
+logging.level: info
+logging.to_files: false
+logging.to_stderr: true
+logging.metrics.enabled: false

@@ -1,0 +1,54 @@
+name: filebeat
+
+services:
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.15.3
+    container_name: filebeat
+    user: root
+
+    # -------------------------------------------------------------------------
+    # `command` image'ning standart CMD'ini ALMASHTIRADI. Image'da u
+    # ["-environment", "container"] bo'lgan — aynan shu Filebeat'ga o'z
+    # loglarini stderr ga yozishni aytadi.
+    #
+    # Faqat "--strict.perms=false" qoldirilsa, Filebeat loglarini konteyner
+    # ichidagi /usr/share/filebeat/logs/ ga yozadi va `docker logs filebeat`
+    # BO'SH ko'rinadi. Shuning uchun ikkalasini ham qaytaramiz:
+    #   -e  = loglarni stderr ga (ya'ni `docker logs` ga) yoz
+    # -------------------------------------------------------------------------
+    command: [ "-e", "-environment", "container", "--strict.perms=false" ]
+    volumes:
+      - ./filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+
+      # -----------------------------------------------------------------------
+      # Registry: qaysi fayldan qayergacha o'qilgani.
+      # Yo'qotsangiz butun tarix qaytadan indekslanadi (dublikat).
+      # -----------------------------------------------------------------------
+      - ./.volumes/filebeat-data:/usr/share/filebeat/data
+
+      # -----------------------------------------------------------------------
+      # LOG KATALOGI — `logs` ning O'ZI mount qilinadi, ichidagi
+      # async/ gateway/ http/ ws/ kataloglari bilan birga.
+      #
+      # Chapda: host yo'li     O'ngda: filebeat.yml ko'radigan nom
+      # Ikkinchi servis qo'shsangiz — yangi qator + filebeat.yml ga input
+      # -----------------------------------------------------------------------
+      - /home/devops/anticopy-backend/logs:/logs/anticopy:ro
+      # - /var/log/id-ilmiy:/logs/id-ilmiy:ro
+    environment:
+      - ELASTIC_HOSTS=http://192.168.100.176:9200
+      - ELASTIC_API_KEY=${ELASTIC_API_KEY}
+      - SERVER_NAME=${SERVER_NAME}
+    mem_limit: 536870912
+    restart: unless-stopped
+
+    # -------------------------------------------------------------------------
+    # Bu — Docker'ning log drayveri (Filebeat'ning `logging:` bloki EMAS).
+    # Endi Filebeat stdout ga yozgani uchun, cheklovsiz qoldirilsa diskni
+    # asta-sekin to'ldiradi.
+    # -------------------------------------------------------------------------
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -52,13 +52,38 @@ filebeat.inputs:
           target_prefix: ""
           ignore_failure: true
 
-      # zap nomlarini ECS'ga moslash — Kibana ekranlari shuni kutadi
+      # -----------------------------------------------------------------------
+      # TIP TO'QNASHUVI 1: `status`
+      #   http/  -> 404      (son)
+      #   async/ -> "FAIL"   (matn)
+      # Elasticsearch bitta maydonda ikkala tipni saqlay olmaydi. http'niki
+      # HTTP status kodi, async'niki esa vazifa natijasi — ular mohiyatan
+      # boshqa narsa, shuning uchun async'nikini alohida nomga ajratamiz.
+      # Bu `error` dan OLDIN turishi kerak (quyidagi izohga qarang).
+      # -----------------------------------------------------------------------
+      - rename:
+          when:
+            equals:
+              log_type: "async"
+          fields:
+            - from: "status"
+              to: "task_status"
+          ignore_missing: true
+          fail_on_error: false
+
+      # -----------------------------------------------------------------------
+      # TIP TO'QNASHUVI 2: `error`
+      #   http/  -> "code=404, message=Not Found"   (matn)
+      #   async/ -> {"message": "..."}              (obyekt)
+      # Ikkalasini ham OBYEKT ga keltiramiz:
+      #   - matn bo'lsa  -> error.message ga ko'chadi
+      #   - obyekt bo'lsa-> error.message allaqachon bor, rename o'tkazib
+      #                     yuboriladi (fail_on_error: false), obyekt qoladi
+      # Natijada har doim `error.message` — qidirish ham yagona joydan.
       #
-      # `error` TARTIBI MUHIM: ilova uni MATN qilib yozadi, ECS esa OBYEKT
-      # kutadi -> ES 400 (mapper_parsing_exception) qaytarib, Filebeat
-      # hujjatni jimgina tashlab yuborardi. Shuning uchun `error.message`
-      # birinchi turishi kerak: aks holda `error.stack_trace` matn `error`
-      # ni ustidan yozib yuboradi.
+      # SHART: indeks qaytadan yaratilishi kerak. Hozirgi indeksda `error`
+      # `text` bo'lib qolgan — mapping'ni o'zgartirib bo'lmaydi.
+      # -----------------------------------------------------------------------
       - rename:
           fields:
             - from: "error"
@@ -78,6 +103,24 @@ filebeat.inputs:
           fields: [ "ts" ]
           ignore_missing: true
 
+      # -----------------------------------------------------------------------
+      # DUBLIKATGA QARSHI HIMOYA
+      #
+      # Hujjat _id si fayl yo'li + qatorning fayldagi o'rnidan hosil qilinadi.
+      # Ayni qator qayta o'qilsa _id bir xil chiqadi va Elasticsearch uni
+      # YANGISI sifatida emas, USTIGA yozadi.
+      #
+      # Natija: registry yo'qolsa ham (yoki qo'lda o'chirilsa ham) dublikat
+      # paydo bo'lmaydi — eng ko'pi bilan o'sha hujjat qayta yoziladi.
+      #
+      # MUHIM: `log.offset` fayl oxirida global `drop_fields` bilan
+      # o'chiriladi, shuning uchun bu processor SHU YERDA — input ichida —
+      # turishi shart.
+      # -----------------------------------------------------------------------
+      - fingerprint:
+          fields: [ "log.file.path", "log.offset" ]
+          target_field: "@metadata._id"
+
     # 0 = butun tarix. Birinchi sinovda 168h qo'yib, @timestamp to'g'riligini
     # tasdiqlagach 0 ga o'tkazing.
     ignore_older: 0
@@ -86,6 +129,133 @@ filebeat.inputs:
     # Kun tugagach fayl o'zgarmaydi — harvester yopiladi, fd tejaladi.
     # Bir yillik arxivda bu yuzlab file descriptor demakdir.
     close.on_state_change.inactive: 30m
+
+  # ---------------------------------------------------------------------------
+  # FILEBEAT'NING O'Z LOGLARI — faqat error va warn.
+  #
+  # Maqsad: Filebeat singanda (mapping to'qnashuvi, ES yiqilgani, ruxsat
+  # xatosi) buni Kibana'dan bilish. Info/success loglari yig'ilmaydi.
+  #
+  # REKURSIYA HAQIDA: ha, Filebeat o'z logini o'qiydi. Halqa faqat SHU
+  # loglarning o'zi rad etilsa yuzaga keladi (rad etish -> warn -> yana
+  # rad etish -> ...). Shuning uchun quyida `service` maydoni olib
+  # tashlanadi: Filebeat o'z logida uni OBYEKT (`service.name`) qilib
+  # yozadi, anticopy loglarida esa u MATN — to'qnashadi va aynan o'sha
+  # halqani boshlab yuborardi.
+  # ---------------------------------------------------------------------------
+  - type: filestream
+    id: filebeat-selflog
+    paths:
+      - /usr/share/filebeat/logs/filebeat-*.ndjson
+
+    prospector.scanner:
+      # events-data logi — rad etilgan hujjatlarning to'liq nusxasi.
+      # Bir qator megabaytlarga yetishi mumkin; ELK'ga kerak emas.
+      exclude_files: [ 'events-data' ]
+
+    parsers:
+      - ndjson:
+          target: ""
+          overwrite_keys: true
+          add_error_key: true
+
+    processors:
+      # ---- faqat error va warn; qolgani tashlanadi ----
+      - drop_event:
+          when:
+            not:
+              or:
+                - equals:
+                    log.level: "error"
+                - equals:
+                    log.level: "warn"
+
+      # ---- `service` to'qnashuvini oldini olish (yuqoridagi izohga qarang) ----
+      - drop_fields:
+          fields: [ "service", "service.name" ]
+          ignore_missing: true
+
+      - add_fields:
+          target: ""
+          fields:
+            service: filebeat
+            log_type: selflog
+
+      # dublikatga qarshi — yuqoridagi izohga qarang
+      - fingerprint:
+          fields: [ "log.file.path", "log.offset" ]
+          target_field: "@metadata._id"
+
+    # Birinchi ishga tushishda butun o'z tarixini yuborib yubormasin.
+    ignore_older: 24h
+    close.on_state_change.inactive: 5m
+
+  # ---------------------------------------------------------------------------
+  # RAD ETILGAN HUJJATLAR LOGI — nima uchun tashlanganini aytadigan yagona joy.
+  #
+  # Yuqoridagi selflog inputi faqat "Cannot index event ... look at the event
+  # log" deb signal beradi; SABAB esa shu faylda.
+  #
+  # Ammo bu faylning har bir qatori rad etilgan hujjatning TO'LIQ nusxasini
+  # o'z ichiga oladi — o'nlab KB bo'lishi mumkin. Bundan ham yomoni: agar shu
+  # loglarning o'zi rad etilsa, keyingi qator oldingisini ichiga o'raydi va
+  # xabar eksponensial o'sadi.
+  #
+  # Shuning uchun: sababni ajratib olamiz, hujjat nusxasini TASHLAYMIZ.
+  # ---------------------------------------------------------------------------
+  - type: filestream
+    id: filebeat-droplog
+    paths:
+      - /usr/share/filebeat/logs/filebeat-events-data-*.ndjson
+
+    parsers:
+      - ndjson:
+          target: ""
+          overwrite_keys: true
+
+    processors:
+      # "Cannot index event '<ULKAN HUJJAT>' (status=400): {sabab}, dropping..."
+      # -> `(status=` dan keyingi hammasini `es_detail` ga olamiz.
+      #    Sabab shu qismning BOSHIDA turadi, shuning uchun kesish xavfsiz.
+      - dissect:
+          tokenizer: "Cannot index event %{} (status=%{es_detail}"
+          field: "message"
+          target_prefix: ""
+          ignore_failure: true
+
+      # Ulkan asl xabarni butunlay tashlaymiz — eksponensial o'sish shu yerda
+      # uziladi. `service` esa anticopy loglaridagi matn bilan to'qnashadi.
+      - drop_fields:
+          fields: [ "message", "service", "service.name" ]
+          ignore_missing: true
+
+      # Sabab uzun bo'lsa ham ("Preview of field's value: ..." qismi bilan)
+      # 1500 belgidan oshmasin.
+      - truncate_fields:
+          fields: [ "es_detail" ]
+          max_characters: 1500
+          ignore_missing: true
+          fail_on_error: false
+
+      # dissect ishlamagan qatorlar (boshqa turdagi xatolar) kerak emas
+      - drop_event:
+          when:
+            not:
+              has_fields: [ "es_detail" ]
+
+      - add_fields:
+          target: ""
+          fields:
+            service: filebeat
+            log_type: dropped
+
+      # dublikatga qarshi — yuqoridagi izohga qarang
+      - fingerprint:
+          fields: [ "log.file.path", "log.offset" ]
+          target_field: "@metadata._id"
+
+    ignore_older: 24h
+    close.on_state_change.inactive: 5m
 
   # ---------------------------------------------------------------------------
   # Ikkinchi servis — nusxa olib, id / paths ni o'zgartiring.
@@ -118,8 +288,6 @@ filebeat.inputs:
   #         ignore_failure: true
   #     - rename:
   #         fields:
-  #           - from: "error"
-  #             to: "error.message"
   #           - from: "msg"
   #             to: "message"
   #           - from: "level"
@@ -167,12 +335,25 @@ output.elasticsearch:
   backoff.max: 60s
 
 # =============================================================================
-# Filebeat'ning O'Z loglari.
-# to_files: false + to_stderr: true  ->  `docker logs filebeat` da ko'rinadi.
-# Aks holda ular konteyner ichidagi /usr/share/filebeat/logs/ ga yozilib,
-# tashqaridan ko'rinmay qoladi.
+# Filebeat'ning O'Z loglari — IKKALA joyga ham yoziladi:
+#   to_stderr -> `docker logs filebeat` (qo'lda ko'rish uchun)
+#   to_files  -> /usr/share/filebeat/logs/ (yuqoridagi `filebeat-selflog`
+#                inputi shu fayllarni o'qib ELK'ga yuboradi)
+#
+# DIQQAT: docker-compose.yml dagi `command` ga `-e` QO'SHMANG. U bayroq
+# fayl loglarini majburan o'chiradi va selflog inputi o'qiydigan narsa
+# qolmaydi. Shuning uchun stderr shu yerda, konfig orqali yoqilgan.
+#
+# keepfiles/rotateeverybytes — disk cheklovi. Bularsiz log fayllar
+# to'planib ketadi.
 # =============================================================================
 logging.level: info
-logging.to_files: false
 logging.to_stderr: true
+logging.to_files: true
+logging.files:
+  path: /usr/share/filebeat/logs
+  name: filebeat
+  rotateeverybytes: 10485760      # 10 MB
+  keepfiles: 3
+  permissions: 0644
 logging.metrics.enabled: false

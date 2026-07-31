@@ -11,12 +11,15 @@ services:
     # ["-environment", "container"] bo'lgan — aynan shu Filebeat'ga o'z
     # loglarini stderr ga yozishni aytadi.
     #
-    # Faqat "--strict.perms=false" qoldirilsa, Filebeat loglarini konteyner
-    # ichidagi /usr/share/filebeat/logs/ ga yozadi va `docker logs filebeat`
-    # BO'SH ko'rinadi. Shuning uchun ikkalasini ham qaytaramiz:
-    #   -e  = loglarni stderr ga (ya'ni `docker logs` ga) yoz
+    # Faqat "--strict.perms=false" qoldirilsa, `docker logs filebeat` bo'sh
+    # ko'rinadi. Shuning uchun standart CMD'ni qaytaramiz.
+    #
+    # `-e` bayrog'i ATAYLAB YO'Q: u stderr ni yoqadi-yu, FAYL loglarini
+    # majburan o'chiradi. Bizga fayllar kerak — `filebeat-selflog` inputi
+    # ularni o'qib ELK'ga yuboradi. Stderr esa filebeat.yml da
+    # `logging.to_stderr: true` orqali yoqilgan.
     # -------------------------------------------------------------------------
-    command: [ "-e", "-environment", "container", "--strict.perms=false" ]
+    command: [ "-environment", "container", "--strict.perms=false" ]
     volumes:
       - ./filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
 

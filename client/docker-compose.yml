@@ -14,10 +14,9 @@ services:
     # Faqat "--strict.perms=false" qoldirilsa, `docker logs filebeat` bo'sh
     # ko'rinadi. Shuning uchun standart CMD'ni qaytaramiz.
     #
-    # `-e` bayrog'i ATAYLAB YO'Q: u stderr ni yoqadi-yu, FAYL loglarini
-    # majburan o'chiradi. Bizga fayllar kerak — `filebeat-selflog` inputi
-    # ularni o'qib ELK'ga yuboradi. Stderr esa filebeat.yml da
-    # `logging.to_stderr: true` orqali yoqilgan.
+    # Stderr filebeat.yml dagi `logging.to_stderr: true` orqali yoqilgan.
+    # Fayl loglari esa `logging.to_files: false` bilan o'chirilgan — ularni
+    # o'qiydigan input qolmadi.
     # -------------------------------------------------------------------------
     command: [ "-environment", "container", "--strict.perms=false" ]
     volumes:

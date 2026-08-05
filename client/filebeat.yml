@@ -1,28 +1,39 @@
 # =============================================================================
 # App serveridagi Filebeat
 #
-# Kutilayotgan tuzilma. Chapda host'dagi haqiqiy yo'l, o'ngda konteyner
-# ichidagi ko'rinishi (docker-compose.yml dagi mount):
-#   /home/devops/anticopy-backend/logs/async/2026-07-25.log
-#                                 -> /logs/anticopy/async/2026-07-25.log
-#   ...gateway/ , http/ , ws/ — xuddi shunday
+# Muhitga bog'liq qiymat bu faylda YO'Q — hammasi `.env` dan keladi.
 #
-# Katalog nomi = log_type. Yangi tur qo'shilsa konfigga tegish SHART EMAS.
-# Yangi kunlik fayl ham avtomatik topiladi.
+# Konteyner ichidagi kutilayotgan tuzilma:
+#   /logs/<servis>/<log_type>/<sana>.log
+#   masalan  /logs/anticopy/http/2026-08-04.log
+#
+# Katalog nomlari maydonga aylanadi:  1-bo'lak -> service,  2-bo'lak -> log_type
+#
+# Shuning uchun na servis nomi, na log turi bu yerda sanalmaydi. Yangi log
+# turi yoki yangi servis qo'shish uchun docker-compose.yml ga bitta mount
+# qatori yetarli.
 # =============================================================================
-
 
 
 filebeat.inputs:
 
   - type: filestream
-    id: anticopy-dev                        # <-- SERVIS NOMI (unikal bo'lsin)
+
+    # `id` — registry kaliti: "qaysi fayldan qayergacha o'qidim" holati shu
+    # nom ostida saqlanadi. Hujjatlarga maydon bo'lib CHIQMAYDI.
+    #
+    # O'ZGARTIRMANG. O'zgarsa holat yo'qoladi va butun tarix ES'ga qaytadan
+    # yuboriladi (`fingerprint` tufayli dublikat chiqmaydi, lekin behuda yuk).
+    id: ${INPUT_ID}
+
+    # /logs/ ostidagi hamma servis, hamma log turi.
     paths:
-      - /logs/anticopy/*/*.log
+      - /logs/*/*/*.log
 
     prospector.scanner:
-      # Har bir katalogdagi `.log` — joriy faylga simvolik havola.
-      # Kuzatilsa bugungi loglar IKKI MARTA indekslanadi.
+      # Ilova har bir katalogda joriy faylga `.log` simvolik havolasi yaratadi.
+      # Kuzatilsa bugungi loglar ikki marta indekslanadi — ikkala sozlama ham
+      # shuning uchun kerak.
       symlinks: false
       exclude_files: [ '/\.log$' ]
 
@@ -34,9 +45,9 @@ filebeat.inputs:
           expand_keys: true
 
     processors:
-      # ---- zap ISO8601 yozadi: "2026-07-20T14:47:11.327+0500" ----
-      # 'UNIX' (epoch float) EMAS — u bilan parse doim fail bo'lib,
-      # @timestamp = "Filebeat o'qigan payt" bo'lib qolardi.
+      # zap ISO8601 yozadi: "2026-07-20T14:47:11.327+0500".
+      # Layout mos kelmasa @timestamp "Filebeat o'qigan payt" bo'lib qoladi va
+      # Kibana'dagi vaqt filtri butunlay noto'g'ri ishlaydi.
       - timestamp:
           field: ts
           layouts:
@@ -44,32 +55,20 @@ filebeat.inputs:
             - '2006-01-02T15:04:05Z07:00'
           ignore_missing: true
 
-      # Yo'ldan service va log_type ni ajratadi:
-      #   /logs/plagix/http/2026-07-25.log -> service=plagix, log_type=http
+      # Servis nomi konfigda qotirilmasligining sababi shu processor:
+      #   /logs/anticopy/http/2026-08-04.log -> service=anticopy, log_type=http
       - dissect:
           tokenizer: "/logs/%{service}/%{log_type}/%{}.log"
           field: "log.file.path"
           target_prefix: ""
           ignore_failure: true
 
-      # -----------------------------------------------------------------------
-      # Bu yerda `error` ga TEGILMAYDI — ataylab.
+      # Sof nom konvensiyasi — tur o'zgarmaydi, shuning uchun xavfsiz.
       #
-      # Ilgari `error` -> `error.message` ko'chirish bor edi, izohida esa
-      # "async obyekt yozadi" deyilgan edi. Bu XATO edi: kodda bironta
-      # MarshalLogObject yo'q va hamma joyda zap.Error() ishlatiladi — u DOIM
-      # matn yozadi. Obyektni aynan o'sha rename yasagan, ES'da `error` esa
-      # `text` bo'lgan -> har bir voqea 400 bilan rad etilgan.
-      #
-      # `stacktrace` -> `error.stack_trace` ham olib tashlandi. Birinchidan,
-      # ilova `stacktrace` degan maydonni umuman yozmaydi (u `stack` deb
-      # ataladi), ya'ni qoida hech qachon ishlamagan. Ikkinchidan, agar uni
-      # `stack` ga to'g'rilaganimizda `error` yana OBYEKT bo'lib qolardi va
-      # yuqoridagi to'qnashuv qaytardi.
-      #
-      # Natija: `error` va `stack` — ikkita oddiy matn maydoni. Bitta tur,
-      # to'qnashuv manbasi yo'q.
-      # -----------------------------------------------------------------------
+      # `error` va `status` ga TEGILMAYDI va bu yerga qo'shilmasin ham:
+      # ikkalasi ham oddiy matn/son bo'lib kelishi kerak. `error` ni
+      # `error.message` ga ko'chirish uni OBYEKTGA aylantiradi va ES uni
+      # to'qnashuv deb rad etadi (400, qayta urinilmaydi, qator yo'qoladi).
       - rename:
           fields:
             - from: "msg"
@@ -81,151 +80,160 @@ filebeat.inputs:
           ignore_missing: true
           fail_on_error: false
 
+      # `ts` dan @timestamp olindi, asl maydon keraksiz.
       - drop_fields:
           fields: [ "ts" ]
           ignore_missing: true
 
-      # -----------------------------------------------------------------------
-      # DUBLIKATGA QARSHI HIMOYA
+      # Hujjat _id si fayl yo'li + qatorning fayldagi o'rnidan hosil bo'ladi.
+      # Ayni qator qayta o'qilsa _id bir xil chiqadi va ES uni yangisi
+      # sifatida emas, ustiga yozadi — registry yo'qolsa ham dublikat yo'q.
       #
-      # Hujjat _id si fayl yo'li + qatorning fayldagi o'rnidan hosil qilinadi.
-      # Ayni qator qayta o'qilsa _id bir xil chiqadi va Elasticsearch uni
-      # YANGISI sifatida emas, USTIGA yozadi.
-      #
-      # Natija: registry yo'qolsa ham (yoki qo'lda o'chirilsa ham) dublikat
-      # paydo bo'lmaydi — eng ko'pi bilan o'sha hujjat qayta yoziladi.
-      #
-      # MUHIM: `log.offset` fayl oxirida global `drop_fields` bilan
-      # o'chiriladi, shuning uchun bu processor SHU YERDA — input ichida —
-      # turishi shart.
-      # -----------------------------------------------------------------------
+      # SHU YERDA turishi shart: `log.offset` fayl oxiridagi global
+      # `drop_fields` bilan o'chiriladi.
       - fingerprint:
           fields: [ "log.file.path", "log.offset" ]
           target_field: "@metadata._id"
 
-    # 0 = butun tarix. Birinchi sinovda 168h qo'yib, @timestamp to'g'riligini
-    # tasdiqlagach 0 ga o'tkazing.
-    ignore_older: 0
+    ignore_older: ${IGNORE_OLDER}     # 0 = butun tarix
     clean_inactive: 0                 # ignore_older dan KATTA yoki 0
 
-    # Kun tugagach fayl o'zgarmaydi — harvester yopiladi, fd tejaladi.
-    # Bir yillik arxivda bu yuzlab file descriptor demakdir.
-    close.on_state_change.inactive: 30m
-
-  # ---------------------------------------------------------------------------
-  # Ikkinchi servis — nusxa olib, id / paths ni o'zgartiring.
-  # docker-compose.yml ga mos mount qo'shishni unutmang.
-  # ---------------------------------------------------------------------------
-  # - type: filestream
-  #   id: id-ilmiy
-  #   paths:
-  #     - /logs/id-ilmiy/*/*.log
-  #   prospector.scanner:
-  #     symlinks: false
-  #     exclude_files: ['/\.log$']
-  #   parsers:
-  #     - ndjson:
-  #         target: ""
-  #         overwrite_keys: true
-  #         add_error_key: true
-  #         expand_keys: true
-  #   processors:
-  #     - timestamp:
-  #         field: ts
-  #         layouts:
-  #           - '2006-01-02T15:04:05.000Z0700'
-  #           - '2006-01-02T15:04:05Z07:00'
-  #         ignore_missing: true
-  #     - dissect:
-  #         tokenizer: "/logs/%{service}/%{log_type}/%{}.log"
-  #         field: "log.file.path"
-  #         target_prefix: ""
-  #         ignore_failure: true
-  #     - rename:
-  #         fields:
-  #           - from: "msg"
-  #             to: "message"
-  #           - from: "level"
-  #             to: "log.level"
-  #         ignore_missing: true
-  #         fail_on_error: false
-  #     - drop_fields:
-  #         fields: ["ts"]
-  #         ignore_missing: true
-  #   ignore_older: 0
-  #   clean_inactive: 0
-  #   close.on_state_change.inactive: 30m
+    # Fayl shuncha vaqt o'zgarmasa harvester yopiladi. Kunlik fayllar
+    # to'planganda bu yuzlab file descriptor tejaydi.
+    close.on_state_change.inactive: ${CLOSE_INACTIVE}
 
 
 processors:
   - add_host_metadata: ~
 
-  # Bir nechta app server bo'lganda ajratish uchun
   - add_fields:
       target: ""
       fields:
         server: ${SERVER_NAME}
 
+  # DIQQAT: `log.offset` shu yerda o'chadi — yuqoridagi `fingerprint` undan
+  # oldin ishlashi shart.
   - drop_fields:
       fields: [ "agent.ephemeral_id", "ecs.version", "input.type", "log.offset" ]
       ignore_missing: true
 
 
 # =============================================================================
-# Bu agent indeks shabloni / ILM / dashboard yaratishga URINMAYDI — cheklangan
-# API key bilan qila olmaydi va ishga tushmay xato berardi.
+# Bu agent indeks shabloni / ILM / dashboard YARATMAYDI — cheklangan API key
+# bilan qila olmaydi va ishga tushmay xato beradi.
 #
-# TEKSHIRILGAN HOLAT (2026-08-04): klasterda `filebeat-*` uchun umuman shablon
-# YO'Q (`GET _index_template?name=filebeat*` -> bo'sh). Ilgari bu yerda
-# "markaziy Filebeat yaratgan" deb yozilgan edi — u yaratmagan. Ya'ni hozir
-# hamma maydon DINAMIK mapping bilan ketadi va turini birinchi hujjat
-# belgilaydi. Shuning uchun loglarning tur barqarorligi ilova tomonida
-# ta'minlanadi.
+# Klasterda `filebeat-*` uchun shablon yo'q, ya'ni hamma maydon DINAMIK
+# mapping bilan ketadi: turini birinchi hujjat belgilaydi va keyin uni
+# o'zgartirib bo'lmaydi. Shuning uchun loglarning tur barqarorligi ILOVA
+# tomonida ta'minlanadi, bu yerda emas.
 # =============================================================================
+# ILM yoqilsa Filebeat o'zi rollover indekslarini boshqaradi VA yuqoridagi
+# `index:` sozlamasini JIMGINA e'tiborsiz qoldiradi ("Custom index settings
+# are ignored when ILM is enabled"). Ya'ni yoqsangiz indeks nomingiz yo'qoladi.
+# Bundan tashqari `manage_ilm` huquqi kerak — API keyda u yo'q.
 setup.ilm.enabled: false
+
+# Filebeat'ning standart ECS shabloni (minglab maydon) yuklanmasin.
+# `manage_index_templates` huquqi kerak — API keyda u yo'q, yuklashga
+# urinsa ishga tushmay xato beradi.
 setup.template.enabled: false
-setup.kibana.enabled: false
+
+# Kibana dashboard'lari yuklanmasin. Bu ALLAQACHON standart holat —
+# hujjat: "Dashboard loading is disabled by default" va u faqat shu sozlama
+# yoqilganda yoki `filebeat setup` buyrug'i bilan ishga tushadi.
+# Aniqlik uchun ochiq yozilgan.
+setup.dashboards.enabled: false
+
+# Bu ikkovi shablon YARATILGANDA ishlatilardi: `name` — shablonning ES'dagi
+# nomi, `pattern` — u qaysi indekslarga tegishli ekani (index_patterns).
+#
+# `setup.template.enabled: false` bo'lgani uchun ular hozir HECH NARSA
+# QILMAYDI. Tekshirilgan: ikkovi olib tashlansa ham, qiymat bema'ni bo'lsa ham
+# `filebeat test config` -> Config OK.
+#
+# Baribir qoldirilgan: hujjat "`index` ni o'zgartirsangiz shu ikkovi ham
+# kerak" deydi, `test config` esa buni tekshirmaydi. Ishga tushishda kutilmagan
+# xato bo'lgandan ko'ra ikkita qator turgani arzon.
+#
+# Nomi shu o'rnatmaning indeksidan olinadi. Kimdir kelajakda shablonni yoqsa,
+# u FAQAT shu serverning indekslariga tegadi — `filebeat-*` deb qoldirilsa
+# klasterdagi boshqa agentlarning indekslarini ham qamrab olardi.
+# `${ES_INDEX}*` ikkalasini oladi: asosiy indeks va uning dead-letter'i.
+setup.template.name: "${ES_INDEX}"
+setup.template.pattern: "${ES_INDEX}*"
 
 
 output.elasticsearch:
   hosts: [ "${ELASTIC_HOSTS}" ]
   # XOM format: <id>:<api_key>. Kibana bergan Base64 ("Encoded") EMAS.
+  #
+  # Filebeat qiymatni O'ZI base64 qiladi (8.15.3 manbasi, eslegclient:
+  #   conn.apiKeyAuthHeader = "ApiKey " + base64.StdEncoding.EncodeToString(...)
+  # maydon izohi: "Raw API key, NOT base64-encoded"). Encoded qiymat qo'yilsa
+  # ikki marta kodlanadi; ES bir marta dekod qiladi, ichida `:` topolmaydi va
+  # 401 "invalid ApiKey value" beradi.
+  #
+  # TUZOQ: curl bilan tekshirish chalg'itadi —
+  #   curl -H "Authorization: ApiKey <encoded>" .../_security/_authenticate
+  # muvaffaqiyat qaytaradi, chunki HTTP SARLAVHASI encoded qiymat kutadi.
+  # Konfig esa xom qiymat kutadi. Ikkisi bir xil emas. Filebeat qanday
+  # yuborsa, shunday tekshiring:
+  #   curl -H "Authorization: ApiKey $(printf %s "$KEY" | base64 -w0)" ...
   api_key: "${ELASTIC_API_KEY}"
-  bulk_max_size: 50
+  bulk_max_size: ${BULK_MAX_SIZE}
   backoff.init: 1s
   backoff.max: 60s
 
   # ---------------------------------------------------------------------------
-  # RAD ETILGAN HUJJATLAR (mapping to'qnashuvi va h.k.)
+  # `filebeat-` PREFIKSI MAJBURIY — quyidagi ikkala nom uchun ham.
+  # API key aynan `filebeat-*` va `.ds-filebeat-*` ga `create_doc` +
+  # `auto_configure` beradi; boshqa prefiks -> har bir hujjat 403 -> hech
+  # narsa kelmaydi.
   #
-  # Standart siyosat — `drop`: ES 400 qaytarsa voqea JIMGINA yo'qoladi va
-  # buni faqat hisoblagichdan bilish mumkin. Bu yerda esa voqea keyingi
-  # partiyada boshqa indeksga qayta yuboriladi:
+  # Nomda sana yo'q: eski loglarni o'chirish uchun `delete_by_query` kerak
+  # bo'ladi (sekin, joyni darrov bo'shatmaydi). ILM ham o'chiq. Hajm o'ssa
+  # qayta ko'rib chiqiladi.
+  # ---------------------------------------------------------------------------
+  index: "${ES_INDEX}"
+
+  # ---------------------------------------------------------------------------
+  # ES rad etgan hujjat (mapping to'qnashuvi va h.k.) TASHLANMAYDI, keyingi
+  # partiyada shu indeksga qayta yuboriladi:
   #     message       -> asl voqeaning to'liq JSON'i, MATN sifatida
   #     error.type    -> status kodi
   #     error.message -> ES qaytargan sabab
   #
-  # `message` matn bo'lgani uchun uni rad etgan mapping to'qnashuvi bu yerda
-  # takrorlanmaydi.
+  # `message` matn bo'lgani uchun uni rad etgan to'qnashuv bu yerda
+  # takrorlanmaydi. Elastic bu imkoniyatni beta deb belgilagan.
   #
-  # Nom `filebeat-` bilan boshlanishi SHART: API key aynan `filebeat-*` ga
-  # `create_doc` + `auto_configure` beradi. Boshqa nom -> 403 -> yana jimlik.
-  #
-  # DIQQAT: Elastic buni beta deb belgilagan.
+  # QAMROVI: faqat ES RAD ETGAN hujjatlar. ES o'chgani, kalit eskirgani,
+  # Filebeat o'lgani yoki fayl o'qishdagi ruxsat xatosi bu yerga TUSHMAYDI —
+  # ular uchun Kibana'da "oxirgi 15 daqiqada 0 hujjat" ogohlantirishi kerak.
   # ---------------------------------------------------------------------------
   non_indexable_policy.dead_letter_index:
-    index: "filebeat-dead-letter"
+    index: "${ES_DEAD_LETTER_INDEX}"
+
 
 # =============================================================================
-# Filebeat'ning O'Z loglari — faqat stderr, ya'ni `docker logs filebeat`.
+# Filebeat'ning O'Z loglari IKKALA joyga yoziladi:
+#   to_stderr -> `docker logs filebeat`
+#   to_files  -> /usr/share/filebeat/logs/  (host'da ./.volumes/filebeat-logs)
 #
-# Fayl loglari (`to_files`) ATAYLAB O'CHIRILGAN: ular faqat o'sha loglarni
-# qayta o'qib ELK'ga yuboradigan inputlar uchun kerak edi, endi ular yo'q.
-# Yoqib qo'yilsa konteyner ichida hech kim o'qimaydigan fayllar to'planadi.
+# Ular ELK'ga YUBORILMAYDI — bu fayllarni o'qiydigan input yo'q, yagona input
+# faqat /logs/ ostiga qaraydi.
 #
-# Rad etilgan hujjatlar endi yuqoridagi `filebeat-dead-letter` indeksida.
+# Fayl host'ga mount qilingan, ya'ni `tail -f` va `grep` to'g'ridan-to'g'ri
+# ishlaydi va konteyner qayta yaratilganda log yo'qolmaydi.
+#
+# rotateeverybytes/keepfiles — disk cheklovi: 3 x 10 MB dan oshmaydi.
 # =============================================================================
-logging.level: info
+logging.level: ${FILEBEAT_LOG_LEVEL}
 logging.to_stderr: true
-logging.to_files: false
+logging.to_files: true
+logging.files:
+  path: /usr/share/filebeat/logs
+  name: filebeat
+  rotateeverybytes: 10485760      # 10 MB
+  keepfiles: 3
+  permissions: 0644
 logging.metrics.enabled: false

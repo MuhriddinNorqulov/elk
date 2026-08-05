@@ -1,5 +1,10 @@
 name: filebeat
 
+# =============================================================================
+# Bu faylda muhitga bog'liq qiymat YO'Q — hammasi `.env` dan keladi.
+# Boshqa serverga ko'chirish uchun faqat `.env` ni tahrirlang.
+# =============================================================================
+
 services:
   filebeat:
     image: docker.elastic.co/beats/filebeat:8.15.3
@@ -8,45 +13,68 @@ services:
 
     # -------------------------------------------------------------------------
     # `command` image'ning standart CMD'ini ALMASHTIRADI. Image'da u
-    # ["-environment", "container"] bo'lgan — aynan shu Filebeat'ga o'z
-    # loglarini stderr ga yozishni aytadi.
-    #
-    # Faqat "--strict.perms=false" qoldirilsa, `docker logs filebeat` bo'sh
-    # ko'rinadi. Shuning uchun standart CMD'ni qaytaramiz.
+    # ["-environment", "container"] bo'lgan. Faqat "--strict.perms=false"
+    # qoldirilsa `docker logs filebeat` bo'sh ko'rinadi, shuning uchun
+    # standart CMD'ni qaytaramiz.
     #
     # Stderr filebeat.yml dagi `logging.to_stderr: true` orqali yoqilgan.
-    # Fayl loglari esa `logging.to_files: false` bilan o'chirilgan — ularni
-    # o'qiydigan input qolmadi.
+    # Fayl loglari esa `logging.to_files: false` bilan o'chirilgan.
     # -------------------------------------------------------------------------
     command: [ "-environment", "container", "--strict.perms=false" ]
+
     volumes:
       - ./filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
 
       # -----------------------------------------------------------------------
       # Registry: qaysi fayldan qayergacha o'qilgani.
-      # Yo'qotsangiz butun tarix qaytadan indekslanadi (dublikat).
+      # Yo'qotsangiz butun tarix qaytadan yuboriladi. `fingerprint` tufayli
+      # dublikat chiqmaydi, lekin ES'ga behuda yuk bo'ladi.
       # -----------------------------------------------------------------------
       - ./.volumes/filebeat-data:/usr/share/filebeat/data
 
       # -----------------------------------------------------------------------
-      # LOG KATALOGI — `logs` ning O'ZI mount qilinadi, ichidagi
-      # async/ gateway/ http/ ws/ kataloglari bilan birga.
+      # Filebeat'ning O'Z loglari. Host'ga chiqarilgan, shuning uchun
+      # `tail -f ./.volumes/filebeat-logs/filebeat-*.ndjson` ishlaydi va
+      # konteyner qayta yaratilganda log yo'qolmaydi.
       #
-      # Chapda: host yo'li     O'ngda: filebeat.yml ko'radigan nom
-      # Ikkinchi servis qo'shsangiz — yangi qator + filebeat.yml ga input
+      # Bu fayllar ELK'ga YUBORILMAYDI — yagona input faqat /logs/ ga qaraydi.
       # -----------------------------------------------------------------------
-      - /home/devops/anticopy-backend/logs:/logs/anticopy:ro
-      # - /var/log/id-ilmiy:/logs/id-ilmiy:ro
+      - ./.volumes/filebeat-logs:/usr/share/filebeat/logs
+
+      # -----------------------------------------------------------------------
+      # LOG KATALOGI.
+      #   chapda  — host'dagi yo'l (.env: LOG_DIR)
+      #   o'ngda  — konteyner ichidagi yo'l; oxirgi bo'lak `service` maydoni
+      #             bo'lib chiqadi (.env: SERVICE_NAME)
+      #
+      # Ichida async/ gateway/ http/ ws/ kataloglari kutiladi — ularning
+      # nomi `log_type` bo'ladi. Yangi tur qo'shilsa konfigga tegish shart emas.
+      #
+      # IKKINCHI SERVIS: shunchaki yana bitta qator qo'shing, masalan
+      #   - /var/log/id-ilmiy:/logs/id-ilmiy:ro
+      # filebeat.yml ga TEGISH SHART EMAS — u /logs/ ostidagi hamma servisni
+      # o'zi topadi.
+      # -----------------------------------------------------------------------
+      - ${LOG_DIR}:/logs/${SERVICE_NAME}:ro
+
     environment:
-      - ELASTIC_HOSTS=http://192.168.100.176:9200
+      - ELASTIC_HOSTS=${ELASTIC_HOSTS}
       - ELASTIC_API_KEY=${ELASTIC_API_KEY}
       - SERVER_NAME=${SERVER_NAME}
-    mem_limit: 536870912
+      - INPUT_ID=${INPUT_ID}
+      - ES_INDEX=${ES_INDEX}
+      - ES_DEAD_LETTER_INDEX=${ES_DEAD_LETTER_INDEX}
+      - IGNORE_OLDER=${IGNORE_OLDER}
+      - CLOSE_INACTIVE=${CLOSE_INACTIVE}
+      - BULK_MAX_SIZE=${BULK_MAX_SIZE}
+      - FILEBEAT_LOG_LEVEL=${FILEBEAT_LOG_LEVEL}
+
+    mem_limit: ${FILEBEAT_MEM_LIMIT}
     restart: unless-stopped
 
     # -------------------------------------------------------------------------
     # Bu — Docker'ning log drayveri (Filebeat'ning `logging:` bloki EMAS).
-    # Endi Filebeat stdout ga yozgani uchun, cheklovsiz qoldirilsa diskni
+    # Filebeat stdout ga yozgani uchun, cheklovsiz qoldirilsa diskni
     # asta-sekin to'ldiradi.
     # -------------------------------------------------------------------------
     logging:
